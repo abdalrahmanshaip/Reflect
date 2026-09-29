@@ -16,6 +16,8 @@ public enum TestRegistry {
             + GitImporterTests.entries
             + AnalysisServiceTests.entries
             + PersistenceTests.entries
+            + EventPageTests.entries
+            + ReportEditTrackingTests.entries
     }
 }
 

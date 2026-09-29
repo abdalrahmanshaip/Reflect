@@ -71,7 +71,7 @@ enum ReportGenerator {
         ))
         questions.append(CoachingQuestion(
             id: "\(facts.dayKey)-q2",
-            text: "Today's evidence structurally attributes \(agentCount) events to the agent and leaves \(unclearCount) unclear. Where was the key decision made — by you or by the tool — and what evidence tells you that?"
+            text: "Evidence for \(facts.dayKey) structurally attributes \(agentCount) events to the agent and leaves \(unclearCount) unclear. Where was the key decision made — by you or by the tool — and what evidence tells you that?"
         ))
         if let commits = bySource[.gitLocal]?.count, commits > 0 {
             questions.append(CoachingQuestion(

@@ -5,9 +5,11 @@ struct TodayView: View {
 
     @State private var day = Date()
     @State private var narrative = ""
+    @State private var savedNarrative = ""
     @State private var narrativeGeneratedAt: Date?
     @State private var answers: [String: String] = [:]
     @State private var selectedEventIDs: Set<String> = []
+    @State private var analysisPage = 0
     @State private var analysisText = ""
     @State private var analysisInfo = ""
     @State private var analysisRunning = false
@@ -18,6 +20,20 @@ struct TodayView: View {
     private var dayEvents: [EvidenceEvent] { store.events(onDay: dayKey) }
     private var facts: DayFacts { store.dayFacts(for: dayKey) }
     private var draft: ReportDraft { ReportGenerator.draft(for: facts) }
+    private let analysisPageSize = 25
+
+    private var analysisPageCount: Int {
+        EventPage.pageCount(total: dayEvents.count, pageSize: analysisPageSize)
+    }
+
+    private var analysisPageRange: Range<Int> {
+        EventPage.range(total: dayEvents.count, page: analysisPage, pageSize: analysisPageSize)
+    }
+
+    private var analysisPageEvents: [EvidenceEvent] {
+        let ordered = dayEvents.sorted { $0.timestamp < $1.timestamp }
+        return EventPage.items(ordered, page: analysisPage, pageSize: analysisPageSize)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -114,7 +130,11 @@ struct TodayView: View {
                 .font(.body)
                 .frame(minHeight: 110)
                 .border(Color.secondary.opacity(0.25))
-                .onChange(of: narrative) { _ in dirty = true }
+                .onChange(of: narrative) { value in
+                    if ReportEditTracking.narrativeChanged(current: value, saved: savedNarrative) {
+                        dirty = true
+                    }
+                }
         }
     }
 
@@ -158,7 +178,27 @@ struct TodayView: View {
             if !dayEvents.isEmpty {
                 Text("Select the evidence records to include. Only selected records are ever sent:")
                     .font(.callout)
-                ForEach(dayEvents.sorted { $0.timestamp < $1.timestamp }) { event in
+
+                HStack {
+                    Text("Showing \(analysisPageRange.lowerBound + 1)–\(analysisPageRange.upperBound) of \(dayEvents.count) · \(selectedEventIDs.count) selected")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if analysisPageCount > 1 {
+                        Button("Previous") {
+                            analysisPage = max(0, analysisPage - 1)
+                        }
+                        .disabled(analysisPage == 0)
+                        Text("\(analysisPage + 1) of \(analysisPageCount)")
+                            .font(.caption.monospacedDigit())
+                        Button("Next") {
+                            analysisPage = min(analysisPageCount - 1, analysisPage + 1)
+                        }
+                        .disabled(analysisPage >= analysisPageCount - 1)
+                    }
+                }
+
+                ForEach(analysisPageEvents) { event in
                     Toggle(isOn: selectionBinding(for: event)) {
                         EventRow(event: event, attribution: store.effectiveAttribution(for: event))
                     }
@@ -237,12 +277,14 @@ struct TodayView: View {
 
     private func loadFromStore() {
         let report = store.report(for: dayKey)
+        savedNarrative = report.narrative
         narrative = report.narrative
         narrativeGeneratedAt = report.narrativeGeneratedAt
         answers = report.answers.mapValues(\.text)
         analysisText = report.analysisResult ?? ""
         analysisInfo = report.analysisGeneratedAt.map { "Saved result from \(Fmt.dateTime($0))." } ?? ""
         selectedEventIDs = []
+        analysisPage = 0
         dirty = false
     }
 
@@ -256,6 +298,7 @@ struct TodayView: View {
         }
         report.answers = merged
         store.saveReport(report)
+        savedNarrative = narrative
         dirty = false
     }
 

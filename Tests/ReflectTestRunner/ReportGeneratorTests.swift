@@ -54,12 +54,18 @@ struct ReportGeneratorTests {
         try expectTrue(draft.narrative.lowercased().contains("interpret"), "narrative should tell the user where interpretation belongs")
     }
 
+    func coachingQuestionNamesTheSelectedDay() throws {
+        let draft = ReportGenerator.draft(for: facts(count: 4, corrections: 0))
+        try expectTrue(draft.questions[1].text.contains(dayKey))
+    }
+
     static var entries: [TestEntry] {
         let tests = ReportGeneratorTests()
         return [
             TestEntry(suite: suiteName, name: "sufficientEvidenceProducesDeterministicGroundedQuestions") { try tests.sufficientEvidenceProducesDeterministicGroundedQuestions() },
             TestEntry(suite: suiteName, name: "commitEvidenceAddsItsOwnQuestion") { try tests.commitEvidenceAddsItsOwnQuestion() },
-            TestEntry(suite: suiteName, name: "narrativeDistinguishesObservedFromInterpretation") { try tests.narrativeDistinguishesObservedFromInterpretation() }
+            TestEntry(suite: suiteName, name: "narrativeDistinguishesObservedFromInterpretation") { try tests.narrativeDistinguishesObservedFromInterpretation() },
+            TestEntry(suite: suiteName, name: "coachingQuestionNamesTheSelectedDay") { try tests.coachingQuestionNamesTheSelectedDay() }
         ]
     }
 }
