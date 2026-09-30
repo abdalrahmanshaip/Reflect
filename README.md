@@ -18,7 +18,7 @@ AI provider *and* explicitly run an analysis.
 ./script/build_and_run.sh            # build (release), create app archive, launch
 ./script/build_and_run.sh --verify   # build + tests + app archive checks, no launch
 swift build                          # debug build only
-swift run reflect-test-runner        # authoritative core test suite (53 tests)
+swift run reflect-test-runner        # authoritative core test suite (59 tests)
 swift test                           # Swift Testing delegation target
 ```
 
@@ -65,13 +65,13 @@ normally (e.g. full Xcode), it runs the same suite via a delegation test.
 
 | Source | Location | Status in this version |
 | --- | --- | --- |
-| Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` | Implemented; one recent local session file imported on this Mac |
+| Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` | Implemented; imports only after you opt in |
 | Claude Code | `~/.claude/projects/**/*.jsonl` | Implemented (tolerant JSONL, synthetic-fixture verified) |
 | Copilot CLI | `~/.copilot/session-state/*/events.jsonl` | Implemented (tolerant JSONL; only clear user/agent/tool markers are imported) |
 | Cursor | `~/Library/Application Support/Cursor/User/workspaceStorage/*/state.vscdb` | **Detected; format not yet verified.** Not read, not imported. |
 | VS Code | `~/Library/Application Support/Code/User/workspaceStorage/*/state.vscdb` | **Detected; format not yet verified.** Not read, not imported. |
 | Git (local) | any repository you pick manually | Implemented (read-only `git log` metadata) |
-| ActivityWatch | — | Not installed on this machine; nothing implemented |
+| ActivityWatch | — | Not implemented |
 
 The integration choice for Code Insights and ActivityWatch is documented in
 [the integration review](docs/INTEGRATIONS.md). Imported session records stay
