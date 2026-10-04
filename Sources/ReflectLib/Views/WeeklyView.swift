@@ -1,151 +1,156 @@
 import SwiftUI
 
+/// Design A "This Week": observed day rows for the selected week. Choosing a
+/// day navigates to that exact date in Today; the view itself never edits
+/// stored reports.
 struct WeeklyView: View {
     @EnvironmentObject private var store: AppStore
+    var onOpenDay: (String) -> Void = { _ in }
 
     @State private var weekOffset = 0
-    @State private var selectedDay: Date?
 
     private var referenceDate: Date {
         Calendar.current.date(byAdding: .weekOfYear, value: weekOffset, to: Date()) ?? Date()
     }
 
-    private var weekInterval: DateInterval? {
-        Calendar.current.dateInterval(of: .weekOfYear, for: referenceDate)
-    }
-
-    private var weekDays: [Date] {
-        guard let interval = weekInterval else { return [] }
-        return (0..<7).compactMap { Calendar.current.date(byAdding: .day, value: $0, to: interval.start) }
-    }
-
-    private func events(on date: Date) -> [EvidenceEvent] {
-        let key = Fmt.dayKey(date)
-        return store.events.filter { Fmt.dayKey($0.timestamp) == key }
-    }
-
     var body: some View {
+        let projection = store.weeklyProjection(referenceDate: referenceDate)
         VStack(spacing: 0) {
-            HStack {
-                Button {
-                    weekOffset -= 1
-                } label: {
-                    Image(systemName: "chevron.left")
+            HStack(spacing: 12) {
+                HStack(spacing: 0) {
+                    Button {
+                        weekOffset -= 1
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .frame(width: 26, height: 22)
+                    }
+                    .accessibilityLabel("Previous week")
+                    .reflectClickableHover(RoundedRectangle(cornerRadius: 5))
+                    Divider()
+                        .frame(height: 14)
+                    Button {
+                        weekOffset += 1
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .frame(width: 26, height: 22)
+                            .foregroundStyle(weekOffset >= 0 ? Color(nsColor: .disabledControlTextColor) : Color(nsColor: .controlTextColor))
+                    }
+                    .disabled(weekOffset >= 0)
+                    .accessibilityLabel("Next week")
+                    .reflectClickableHover(RoundedRectangle(cornerRadius: 5))
                 }
-                Text(weekLabel)
-                    .font(.headline)
-                Button {
-                    weekOffset += 1
-                } label: {
-                    Image(systemName: "chevron.right")
+                .buttonStyle(.plain)
+                .background(Capsule().fill(ReflectPalette.button))
+                .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5))
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Previous or next week")
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("This Week")
+                        .font(.headline)
+                    Text(WeekCalendar.weekLabel(for: referenceDate))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .disabled(weekOffset >= 0)
                 Spacer()
-                Text(summaryLine)
+                Text(summaryLine(for: projection))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 22)
+            .padding(.vertical, 12)
 
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Days in this week", systemImage: "calendar.day.timeline.left")
-                            .font(.headline)
-                        ForEach(weekDays, id: \.timeIntervalSince1970) { day in
-                            let dayEvents = events(on: day)
-                            DayRow(
-                                date: day,
-                                count: dayEvents.count,
-                                isToday: Fmt.dayKey(day) == Fmt.dayKey(Date()),
-                                isSelected: selectedDay.map { Fmt.dayKey($0) == Fmt.dayKey(day) } ?? false
-                            )
-                            .contentShape(Rectangle())
-                            .onTapGesture { selectedDay = day }
-                        }
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack(spacing: 8) {
+                        ObservedMark()
+                        Text("Days in this week")
+                            .font(.callout.weight(.semibold))
+                        Text("choose a day to open it in Today")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                     }
+                    .accessibilityElement(children: .combine)
 
-                    if let selectedDay {
-                        let dayEvents = events(on: selectedDay).sorted { $0.timestamp < $1.timestamp }
-                        VStack(alignment: .leading, spacing: 8) {
-                            Label("Evidence for \(Fmt.dayKey(selectedDay))", systemImage: "doc.text.magnifyingglass")
-                                .font(.headline)
-                            if dayEvents.isEmpty {
-                                Text("No evidence for this day.")
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                ForEach(dayEvents) { event in
-                                    EventRow(event: event, attribution: store.effectiveAttribution(for: event))
-                                }
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(projection.days.enumerated()), id: \.element.timeIntervalSince1970) { index, day in
+                            Button {
+                                onOpenDay(Fmt.dayKey(day))
+                            } label: {
+                                WeekDayRow(
+                                    date: day,
+                                    count: projection.counts[index],
+                                    isToday: Fmt.dayKey(day) == Fmt.dayKey(Date())
+                                )
                             }
+                            .buttonStyle(.plain)
+                            .reflectClickableHover(RoundedRectangle(cornerRadius: 6))
+                            .accessibilityLabel(RowAccessibility.weekDayRowLabel(
+                                weekday: Fmt.weekdayName(for: day),
+                                dayLabel: Fmt.sidebarDayLabel(Fmt.dayKey(day)),
+                                isToday: Fmt.dayKey(day) == Fmt.dayKey(Date()),
+                                count: projection.counts[index]
+                            ))
                         }
                     }
 
-                    Text("This view lists observed evidence only. Growth readings and their limitations are shown in the Growth tab; no score is produced anywhere in Reflect.")
+                    Text("This view lists observed records only. Counts show what was imported, not effort or skill — a day without records is unknown, not idle.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .padding(20)
+                .padding(.horizontal, 48)
+                .padding(.top, 30)
+                .padding(.bottom, 44)
+                .frame(maxWidth: 700, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
             }
         }
     }
 
-    private var weekLabel: String {
-        guard let interval = weekInterval else { return "" }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d"
-        return "\(formatter.string(from: interval.start)) – \(formatter.string(from: interval.end.addingTimeInterval(-1)))"
-    }
-
-    private var summaryLine: String {
-        let total = weekDays.reduce(0) { $0 + events(on: $1).count }
-        let daysWithEvidence = weekDays.filter { !events(on: $0).isEmpty }.count
-        let missing = 7 - daysWithEvidence
-        return "\(total) event(s) · \(daysWithEvidence) day(s) with evidence · \(missing) day(s) without"
+    private func summaryLine(for projection: WeeklyRouteProjection) -> String {
+        let total = projection.total
+        let daysWithRecords = projection.daysWithRecords
+        let without = 7 - daysWithRecords
+        return "\(total) record\(total == 1 ? "" : "s") · \(daysWithRecords) day\(daysWithRecords == 1 ? "" : "s") with records · \(without) without"
     }
 }
 
-private struct DayRow: View {
+private struct WeekDayRow: View {
     let date: Date
     let count: Int
     let isToday: Bool
-    let isSelected: Bool
 
     var body: some View {
-        HStack {
-            Text(weekdayName)
-                .frame(width: 90, alignment: .leading)
-            Text(Fmt.dayKey(date))
-                .font(.caption.monospacedDigit())
+        HStack(spacing: 10) {
+            Text(Fmt.weekdayName(for: date))
+                .frame(width: 96, alignment: .leading)
+            Text(Fmt.sidebarDayLabel(Fmt.dayKey(date)))
+                .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .leading)
             if isToday {
-                Text("today")
-                    .font(.caption2)
-                    .foregroundStyle(.blue)
+                Text("Today")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(ReflectPalette.accent)
             }
             Spacer()
             if count == 0 {
-                Text("No evidence")
-                    .font(.caption)
+                Text("No records")
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                Text("\(count) event(s)")
+                Text("\(count) record\(count == 1 ? "" : "s")")
                     .font(.callout.monospacedDigit())
             }
+            Image(systemName: "chevron.right")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 5)
-        .padding(.horizontal, 10)
-        .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-
-    private var weekdayName: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "EEEE"
-        return formatter.string(from: date)
+        .padding(.vertical, 7)
+        .padding(.horizontal, 12)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 }

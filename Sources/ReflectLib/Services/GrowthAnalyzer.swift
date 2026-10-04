@@ -4,26 +4,39 @@ import Foundation
 /// no percentage scores, no competence ranks, and an explicit insufficient-evidence
 /// state whenever the evidence base is too small.
 enum GrowthAnalyzer {
+    private struct WeekKey: Hashable {
+        let yearForWeekOfYear: Int
+        let weekOfYear: Int
+
+        init(_ date: Date, calendar: Calendar) {
+            let components = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: date)
+            yearForWeekOfYear = components.yearForWeekOfYear ?? 0
+            weekOfYear = components.weekOfYear ?? 0
+        }
+    }
+
     static func summarize(
         events: [EvidenceEvent],
         corrections: [AttributionCorrection],
         today: Date = Date(),
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        index: EventProjectionIndex? = nil
     ) -> GrowthSummary {
         let total = events.count
-        let days = Set(events.map { Fmt.dayKey($0.timestamp, calendar: calendar) })
+        let projection = index ?? EventProjectionIndex(events: events, calendar: calendar)
+        let days = Set(projection.dayKeys)
 
         guard total >= AppConstants.minimumEventsForGrowth,
               days.count >= AppConstants.minimumDistinctDaysForGrowth else {
             return GrowthSummary(
                 insufficientEvidence: true,
-                reason: "Insufficient evidence: \(total) event(s) across \(days.count) day(s). At least \(AppConstants.minimumEventsForGrowth) events across \(AppConstants.minimumDistinctDaysForGrowth) days are needed before any growth reading. No score or rank is produced.",
+                reason: "Insufficient evidence: \(total) record(s) across \(days.count) day(s). At least \(AppConstants.minimumEventsForGrowth) records across \(AppConstants.minimumDistinctDaysForGrowth) days are needed before any pattern reading. No score or rank is produced.",
                 observations: [],
                 weekly: []
             )
         }
 
-        let weekly = weekTallies(events: events, endingAt: today, calendar: calendar, weekCount: 8)
+        let weekly = weekTallies(events: events, endingAt: today, calendar: calendar, weekCount: 8, index: projection)
 
         var observations: [GrowthObservation] = []
         let bySource = Dictionary(grouping: events, by: \.sourceKind)
@@ -38,7 +51,7 @@ enum GrowthAnalyzer {
             observations.append(GrowthObservation(
                 id: "obs-source-dominance",
                 label: .observed,
-                text: "Observed: \(top.0.displayName) accounts for \(top.1) of \(total) imported events."
+                text: "Observed: \(top.0.displayName) accounts for \(top.1) of \(total) imported records."
             ))
         }
 
@@ -48,7 +61,7 @@ enum GrowthAnalyzer {
         observations.append(GrowthObservation(
             id: "obs-attribution",
             label: .observed,
-            text: "Observed: structural attribution across \(total) events is agent \(agentCount), unclear \(unclearCount), with \(correctedToYou) event(s) corrected by you."
+            text: "Observed: structural attribution across \(total) records is agent \(agentCount), unclear \(unclearCount), with \(correctedToYou) record(s) corrected by you."
         ))
 
         let approximateCount = events.filter(\.timestampApproximate).count
@@ -56,7 +69,7 @@ enum GrowthAnalyzer {
             observations.append(GrowthObservation(
                 id: "obs-approximate",
                 label: .observed,
-                text: "Observed: \(approximateCount) event(s) have approximate timestamps from file modification time."
+                text: "Observed: \(approximateCount) record(s) have approximate timestamps from file modification time."
             ))
         }
 
@@ -80,7 +93,7 @@ enum GrowthAnalyzer {
                 observations.append(GrowthObservation(
                     id: "inf-week-trend",
                     label: .inference,
-                    text: "App-generated inference: the latest recorded week has \(direction) imported events than the previous one (\(current.eventCount) vs \(previous.eventCount)). Import coverage, not effort, may explain this."
+                    text: "App-generated inference: the latest recorded week has \(direction) imported records than the previous one (\(current.eventCount) vs \(previous.eventCount)). Import coverage, not effort, may explain this."
                 ))
             }
         }
@@ -92,23 +105,44 @@ enum GrowthAnalyzer {
         events: [EvidenceEvent],
         endingAt today: Date,
         calendar: Calendar,
-        weekCount: Int
+        weekCount: Int,
+        index: EventProjectionIndex? = nil
     ) -> [WeekTally] {
         var tallies: [WeekTally] = []
         guard let currentWeek = calendar.dateInterval(of: .weekOfYear, for: today) else { return tallies }
 
+        var intervals: [(start: Date, end: Date)] = []
+        intervals.reserveCapacity(weekCount)
         for offset in (0..<weekCount).reversed() {
             guard let weekStart = calendar.date(byAdding: .weekOfYear, value: -offset, to: currentWeek.start),
                   let interval = calendar.dateInterval(of: .weekOfYear, for: weekStart) else { continue }
-            let weekEvents = events.filter { interval.contains($0.timestamp) }
-            let days = Set(weekEvents.map { Fmt.dayKey($0.timestamp, calendar: calendar) })
-            let bySource = Dictionary(grouping: weekEvents, by: \.sourceKind).mapValues(\.count)
+            intervals.append((interval.start, interval.end))
+        }
+
+        var bucketByWeekKey: [WeekKey: Int] = [:]
+        for index in intervals.indices {
+            bucketByWeekKey[WeekKey(intervals[index].start, calendar: calendar)] = index
+        }
+        var eventCounts = Array(repeating: 0, count: intervals.count)
+        var daysByBucket = Array(repeating: Set<String>(), count: intervals.count)
+        var sourcesByBucket = Array(repeating: [SourceKind: Int](), count: intervals.count)
+        let projection = index ?? EventProjectionIndex(events: events, calendar: calendar)
+
+        for (eventIndex, event) in events.enumerated() {
+            guard let bucket = bucketByWeekKey[WeekKey(event.timestamp, calendar: calendar)] else { continue }
+            eventCounts[bucket] += 1
+            let dayKey = projection.dayKey(atEventIndex: eventIndex) ?? Fmt.dayKey(event.timestamp, calendar: calendar)
+            daysByBucket[bucket].insert(dayKey)
+            sourcesByBucket[bucket][event.sourceKind, default: 0] += 1
+        }
+
+        for (index, interval) in intervals.enumerated() {
             tallies.append(WeekTally(
                 id: Fmt.dayKey(interval.start),
                 weekStart: interval.start,
-                eventCount: weekEvents.count,
-                daysWithEvidence: days.count,
-                bySource: bySource
+                eventCount: eventCounts[index],
+                daysWithEvidence: daysByBucket[index].count,
+                bySource: sourcesByBucket[index]
             ))
         }
         return tallies

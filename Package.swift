@@ -8,12 +8,18 @@ let package = Package(
     ],
     products: [
         .executable(name: "Reflect", targets: ["ReflectApp"]),
-        .executable(name: "reflect-test-runner", targets: ["ReflectTestRunner"])
+        .executable(name: "reflect-test-runner", targets: ["ReflectTestRunner"]),
+        .executable(name: "reflect-ui-fixture", targets: ["ReflectUIFixture"])
     ],
     targets: [
         .target(
             name: "ReflectLib",
-            path: "Sources/ReflectLib"
+            path: "Sources/ReflectLib",
+            swiftSettings: [
+                // The explicit test runner uses @testable import in both debug
+                // and release so the authoritative CLT runner remains honest.
+                .unsafeFlags(["-enable-testing"])
+            ]
         ),
         .executableTarget(
             name: "ReflectApp",
@@ -24,6 +30,13 @@ let package = Package(
             name: "ReflectTestRunner",
             dependencies: ["ReflectLib"],
             path: "Tests/ReflectTestRunner"
+        ),
+        // Test-only synthetic UI launcher: never reads real histories; its store,
+        // home, and secrets are temporary fixtures (see Tests/ReflectUIFixtureMain).
+        .executableTarget(
+            name: "ReflectUIFixture",
+            dependencies: ["ReflectLib"],
+            path: "Tests/ReflectUIFixtureMain"
         ),
         .testTarget(
             name: "ReflectSwiftTests",

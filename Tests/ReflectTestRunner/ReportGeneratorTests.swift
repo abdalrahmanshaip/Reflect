@@ -21,7 +21,8 @@ struct ReportGeneratorTests {
         try expectEqual(draftA.narrative, draftB.narrative, "narrative draft must be deterministic")
         try expectEqual(draftA.questions.map(\.id), draftB.questions.map(\.id), "question ids must be stable")
 
-        try expectTrue(draftA.questions[0].text.contains("4"), "question must ground itself in the event count")
+        try expectTrue(draftA.questions[0].basis.contains("4"), "basis must ground the question in the record count")
+        try expectFalse(draftA.questions[0].text.contains(where: \.isNumber), "primary question wording stays plain; counts live in the basis")
         try expectTrue(draftA.narrative.contains("4 events"))
         try expectTrue(draftA.narrative.contains("1"), "narrative must mention applied corrections")
     }
@@ -56,7 +57,7 @@ struct ReportGeneratorTests {
 
     func coachingQuestionNamesTheSelectedDay() throws {
         let draft = ReportGenerator.draft(for: facts(count: 4, corrections: 0))
-        try expectTrue(draft.questions[1].text.contains(dayKey))
+        try expectTrue(draft.questions[1].basis.contains(dayKey), "the basis must name the selected day")
     }
 
     static var entries: [TestEntry] {

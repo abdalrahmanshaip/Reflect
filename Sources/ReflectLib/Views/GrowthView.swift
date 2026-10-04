@@ -1,12 +1,25 @@
 import SwiftUI
 
+/// Design A "Patterns": qualitative observations over imported evidence.
+/// Deliberately score-free; missing evidence is stated as unknown, never as
+/// lack of work.
 struct GrowthView: View {
     @EnvironmentObject private var store: AppStore
 
     var body: some View {
         let summary = store.growthSummary()
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 22) {
+                HStack(spacing: 8) {
+                    ObservedMark()
+                    Text("Patterns")
+                        .font(.callout.weight(.semibold))
+                    Text("in your imported records")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+
                 if summary.insufficientEvidence {
                     InsufficientEvidenceBanner(reason: summary.reason ?? "Insufficient evidence.")
                     explanation
@@ -16,16 +29,21 @@ struct GrowthView: View {
                 }
                 principles
             }
-            .padding(20)
+            .padding(.horizontal, 48)
+            .padding(.top, 30)
+            .padding(.bottom, 44)
+            .frame(maxWidth: 700, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
-        .navigationTitle("Growth")
+        .background(ReflectPalette.page)
+        .navigationTitle("Patterns")
     }
 
     private var explanation: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Why nothing is shown here yet")
-                .font(.headline)
-            Text("Reflect refuses to guess. A growth reading needs at least \(AppConstants.minimumEventsForGrowth) imported events spread across at least \(AppConstants.minimumDistinctDaysForGrowth) different days. Start an import in Sources, work a few days, and this page will gradually fill with clearly labeled observations — never with a percent score or a career rank.")
+                .font(.callout.weight(.semibold))
+            Text("Reflect refuses to guess. A pattern view needs at least \(AppConstants.minimumEventsForGrowth) imported records spread across at least \(AppConstants.minimumDistinctDaysForGrowth) different days. Start an import in Sources, work a few days, and this page will gradually fill with clearly labeled observations — never with a percent score or a career rank.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -33,8 +51,14 @@ struct GrowthView: View {
 
     private func observations(_ summary: GrowthSummary) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Observations", systemImage: "eye")
-                .font(.headline)
+            HStack(spacing: 8) {
+                ObservedMark()
+                Text("Observations")
+                    .font(.callout.weight(.semibold))
+                Text("qualitative, always labeled")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             ForEach(summary.observations) { observation in
                 HStack(alignment: .top, spacing: 8) {
                     EvidenceLabelBadge(label: observation.label)
@@ -43,7 +67,11 @@ struct GrowthView: View {
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.secondary.opacity(0.07))
+                .background(ReflectPalette.card)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(ReflectPalette.outline, lineWidth: 0.5)
+                }
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
@@ -52,8 +80,11 @@ struct GrowthView: View {
     private func weeklyBars(_ summary: GrowthSummary) -> some View {
         let maxCount = max(1, summary.weekly.map(\.eventCount).max() ?? 1)
         return VStack(alignment: .leading, spacing: 8) {
-            Label("Imported events per week (observed counts)", systemImage: "chart.bar")
-                .font(.headline)
+            HStack(spacing: 8) {
+                ObservedMark()
+                Text("Imported records per week (observed counts)")
+                    .font(.callout.weight(.semibold))
+            }
             ForEach(summary.weekly) { week in
                 HStack(spacing: 10) {
                     Text(week.id)
@@ -64,7 +95,7 @@ struct GrowthView: View {
                             RoundedRectangle(cornerRadius: 3)
                                 .fill(Color.secondary.opacity(0.15))
                             RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.accentColor.opacity(0.7))
+                                .fill(ReflectPalette.accent.opacity(0.7))
                                 .frame(width: geometry.size.width * CGFloat(week.eventCount) / CGFloat(maxCount))
                         }
                     }
@@ -82,8 +113,8 @@ struct GrowthView: View {
 
     private var principles: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("How Reflect reads your growth", systemImage: "scale.3d")
-                .font(.headline)
+            Text("How Reflect reads patterns")
+                .font(.callout.weight(.semibold))
             Text("""
             - Observed facts come only from imported evidence and are labeled as such.
             - App-generated inferences are qualitative and always labeled; they describe imports, not you.

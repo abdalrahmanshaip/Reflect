@@ -1,11 +1,25 @@
 import Foundation
 
-struct ImportOutcome {
-    let kind: SourceKind
-    var events: [EvidenceEvent]
-    var filesScanned: Int
-    var note: String?
+/// The result of one source adapter run: counts and safe notes only. Payload
+/// text never enters an outcome.
+public struct ImportOutcome {
+    public let kind: SourceKind
+    public var events: [EvidenceEvent]
+    public var filesScanned: Int
+    public var note: String?
+
+    public init(kind: SourceKind, events: [EvidenceEvent], filesScanned: Int, note: String?) {
+        self.kind = kind
+        self.events = events
+        self.filesScanned = filesScanned
+        self.note = note
+    }
 }
+
+/// Runs one source's import work away from the main actor. The default is the
+/// real local, read-only orchestrator; tests inject a recording fake to
+/// observe the scheduling boundary without reading anything from disk.
+public typealias ImportSourceExecutor = @Sendable (SourceKind, URL, AppSettings) async -> ImportOutcome
 
 /// Runs an import for one source. Only called from an explicit user action;
 /// nothing here runs automatically or touches the network.
@@ -92,7 +106,7 @@ enum ImportOrchestrator {
                 kind: .gitLocal,
                 events: [],
                 filesScanned: 0,
-                note: "Git import failed: \(error.localizedDescription)"
+                note: "Git import failed. Check the selected repository and try again."
             )
         }
     }

@@ -25,6 +25,7 @@ rm -rf "$APP_STAGE"
 mkdir -p "$APP_STAGE/Contents/MacOS" "$APP_STAGE/Contents/Resources"
 BIN_PATH="$(swift build -c release --show-bin-path)/$APP_NAME"
 cp "$BIN_PATH" "$APP_STAGE/Contents/MacOS/$APP_NAME"
+cp "$ROOT/Resources/Reflect.icns" "$APP_STAGE/Contents/Resources/Reflect.icns"
 
 cat > "$APP_STAGE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -41,6 +42,8 @@ cat > "$APP_STAGE/Contents/Info.plist" <<PLIST
     <string>6.0</string>
     <key>CFBundleName</key>
     <string>$APP_NAME</string>
+    <key>CFBundleIconFile</key>
+    <string>Reflect.icns</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

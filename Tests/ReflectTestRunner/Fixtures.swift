@@ -1,6 +1,23 @@
 import Foundation
 @testable import ReflectLib
 
+/// Event-driven handoff from detached async work back to synchronous tests.
+final class AsyncResultBox<T>: @unchecked Sendable {
+    let semaphore = DispatchSemaphore(value: 0)
+    private var value: T?
+
+    func fulfill(_ newValue: T) {
+        value = newValue
+        semaphore.signal()
+    }
+
+    func take() -> T? {
+        let taken = value
+        value = nil
+        return taken
+    }
+}
+
 enum Fixtures {
     static func makeTempDirectory(_ name: String) -> URL {
         let base = FileManager.default.temporaryDirectory
@@ -8,6 +25,24 @@ enum Fixtures {
         let dir = base.appendingPathComponent(name, isDirectory: true)
         try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    /// Awaits a nonisolated async operation from a synchronous test entry.
+    /// The body must not require the main thread; completion is event-driven
+    /// through a semaphore rather than sleep-based.
+    static func awaitAsync<T: Sendable>(_ body: @escaping @Sendable () async -> T) throws -> T {
+        let box = AsyncResultBox<T>()
+        Task.detached(priority: .userInitiated) {
+            let result = await body()
+            box.fulfill(result)
+        }
+        guard box.semaphore.wait(timeout: .now() + 30) == .success else {
+            throw TestFailure("async test work did not finish within 30s")
+        }
+        guard let value = box.take() else {
+            throw TestFailure("async test work produced no value")
+        }
+        return value
     }
 
     static func write(_ text: String, to url: URL) {
@@ -38,6 +73,169 @@ enum Fixtures {
     {"type":"user.message","timestamp":"2026-03-07T11:00:00Z","content":"Synthetic Copilot CLI input"}
     {"type":"assistant.message","timestamp":"2026-03-07T11:00:10Z","content":"Synthetic Copilot CLI reply"}
     {"type":"tool.invoked","timestamp":"2026-03-07T11:00:20Z","tool":"terminal"}
+    """
+
+    // MARK: Sessions store fixtures (M2, all synthetic)
+
+    /// A synthetic normalized session used by sessions-store and migration
+    /// tests. Mirrors `syntheticSessionsLegacyJSON` exactly.
+    static func syntheticSession(
+        id: String = "fixture-stable-session-1",
+        sourceSessionID: String? = "fixture-session-77",
+        importedAt: Date = referenceDate
+    ) -> WorkSession {
+        let startedAt = Date(timeIntervalSince1970: 1_767_603_605) // 2026-01-05T09:00:05Z
+        let lastActivityAt = Date(timeIntervalSince1970: 1_767_603_680) // 2026-01-05T09:01:20Z
+        let turns = [
+            ConversationTurn(
+                id: "fixture-turn-1",
+                sessionID: id,
+                role: .user,
+                sourceTurnID: "fixture-source-turn-1",
+                sourcePath: "/tmp/fixture/rollout-fixture.jsonl",
+                sourceLine: 2,
+                sequence: 0,
+                observedAttribution: .unclear,
+                observedAttributionNote: "Observed role 'user' in synthetic fixture",
+                revisions: [
+                    TurnRevision(
+                        revisionID: "fixture-revision-1",
+                        importedAt: importedAt,
+                        timestamp: startedAt,
+                        timestampApproximate: false,
+                        retainedText: "Synthetic retained user turn text",
+                        retainedTextTruncated: false,
+                        localPreview: "Synthetic retained user turn text",
+                        previewTruncated: false
+                    )
+                ]
+            ),
+            ConversationTurn(
+                id: "fixture-turn-2",
+                sessionID: id,
+                role: .assistant,
+                sourceTurnID: nil,
+                sourcePath: "/tmp/fixture/rollout-fixture.jsonl",
+                sourceLine: 6,
+                sequence: 1,
+                observedAttribution: .agent,
+                observedAttributionNote: "Observed role 'assistant' in synthetic fixture",
+                revisions: [
+                    TurnRevision(
+                        revisionID: "fixture-revision-2",
+                        importedAt: importedAt,
+                        timestamp: lastActivityAt,
+                        timestampApproximate: false,
+                        retainedText: "Synthetic retained assistant turn text",
+                        retainedTextTruncated: false,
+                        localPreview: "Synthetic retained assistant turn text",
+                        previewTruncated: false
+                    )
+                ]
+            )
+        ]
+        return WorkSession(
+            id: id,
+            sourceKind: .codex,
+            sourceSessionID: sourceSessionID,
+            title: nil,
+            project: nil,
+            importRevision: 1,
+            firstImportedAt: importedAt,
+            lastImportedAt: importedAt,
+            startedAt: startedAt,
+            startedAtApproximate: false,
+            lastActivityAt: lastActivityAt,
+            turns: turns,
+            coverage: CoverageSummary(
+                turnCount: turns.count,
+                approximateTimestampTurnCount: 0,
+                truncatedRetainedTextTurnCount: 0,
+                missingSessionIdentity: sourceSessionID == nil,
+                firstRecordedAt: startedAt,
+                lastRecordedAt: lastActivityAt,
+                parserVersion: "codex-sessions/1",
+                parserUncertaintyNotes: []
+            )
+        )
+    }
+
+    /// Legacy bare-payload JSON (schema version 0) matching
+    /// `syntheticSession()` exactly, so migration round-trips are checkable.
+    static let syntheticSessionsLegacyJSON: String = """
+    [
+      {
+        "coverage" : {
+          "approximateTimestampTurnCount" : 0,
+          "firstRecordedAt" : "2026-01-05T09:00:05Z",
+          "lastRecordedAt" : "2026-01-05T09:01:20Z",
+          "missingSessionIdentity" : false,
+          "parserUncertaintyNotes" : [],
+          "parserVersion" : "codex-sessions/1",
+          "truncatedRetainedTextTurnCount" : 0,
+          "turnCount" : 2
+        },
+        "firstImportedAt" : "2026-01-05T12:00:00Z",
+        "id" : "fixture-stable-session-1",
+        "importRevision" : 1,
+        "lastActivityAt" : "2026-01-05T09:01:20Z",
+        "lastImportedAt" : "2026-01-05T12:00:00Z",
+        "project" : null,
+        "sourceKind" : "codex",
+        "sourceSessionID" : "fixture-session-77",
+        "startedAt" : "2026-01-05T09:00:05Z",
+        "startedAtApproximate" : false,
+        "title" : null,
+        "turns" : [
+          {
+            "id" : "fixture-turn-1",
+            "observedAttribution" : "unclear",
+            "observedAttributionNote" : "Observed role 'user' in synthetic fixture",
+            "revisions" : [
+              {
+                "importedAt" : "2026-01-05T12:00:00Z",
+                "localPreview" : "Synthetic retained user turn text",
+                "previewTruncated" : false,
+                "retainedText" : "Synthetic retained user turn text",
+                "retainedTextTruncated" : false,
+                "revisionID" : "fixture-revision-1",
+                "timestamp" : "2026-01-05T09:00:05Z",
+                "timestampApproximate" : false
+              }
+            ],
+            "role" : "user",
+            "sequence" : 0,
+            "sessionID" : "fixture-stable-session-1",
+            "sourceLine" : 2,
+            "sourcePath" : "/tmp/fixture/rollout-fixture.jsonl",
+            "sourceTurnID" : "fixture-source-turn-1"
+          },
+          {
+            "id" : "fixture-turn-2",
+            "observedAttribution" : "agent",
+            "observedAttributionNote" : "Observed role 'assistant' in synthetic fixture",
+            "revisions" : [
+              {
+                "importedAt" : "2026-01-05T12:00:00Z",
+                "localPreview" : "Synthetic retained assistant turn text",
+                "previewTruncated" : false,
+                "retainedText" : "Synthetic retained assistant turn text",
+                "retainedTextTruncated" : false,
+                "revisionID" : "fixture-revision-2",
+                "timestamp" : "2026-01-05T09:01:20Z",
+                "timestampApproximate" : false
+              }
+            ],
+            "role" : "assistant",
+            "sequence" : 1,
+            "sessionID" : "fixture-stable-session-1",
+            "sourceLine" : 6,
+            "sourcePath" : "/tmp/fixture/rollout-fixture.jsonl",
+            "sourceTurnID" : null
+          }
+        ]
+      }
+    ]
     """
 
     @discardableResult
@@ -125,4 +323,110 @@ enum Fixtures {
         let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         return (out, err, process.terminationStatus)
     }
+
+    // MARK: Synthetic conversation fixtures (M3)
+
+    /// A synthetic durable conversation used by conversations-store,
+    /// versioning, migration, and conversation-service tests. Mirrors
+    /// `syntheticConversationsLegacyJSON` exactly.
+    static func syntheticStoredConversation(
+        conversationID: String = "fixture-conversation-1",
+        requestID: String = "fixture-conversation-request-1"
+    ) -> StoredConversation {
+        let reference = referenceDate
+        let userMessage = ConversationMessage(
+            id: "fixture-conversation-message-1",
+            conversationID: conversationID,
+            speaker: .user,
+            text: "Synthetic fixture question.",
+            createdAt: reference,
+            requestID: requestID,
+            transmission: .sent,
+            requestOutcome: .completed(responseMessageID: "fixture-conversation-message-2"),
+            usage: nil,
+            referencedContextItemIDs: [],
+            agentKind: nil,
+            selectedModel: nil
+        )
+        let assistantMessage = ConversationMessage(
+            id: "fixture-conversation-message-2",
+            conversationID: conversationID,
+            speaker: .assistant,
+            text: "Synthetic fixture answer.",
+            createdAt: reference,
+            requestID: requestID,
+            transmission: .sent,
+            requestOutcome: nil,
+            usage: nil,
+            referencedContextItemIDs: [],
+            agentKind: .codex,
+            selectedModel: nil
+        )
+        return StoredConversation(
+            record: ConversationRecord(
+                id: conversationID,
+                createdAt: reference,
+                updatedAt: reference,
+                messageIDs: [userMessage.id, assistantMessage.id],
+                draftText: nil,
+                draftUpdatedAt: nil
+            ),
+            messages: [userMessage, assistantMessage]
+        )
+    }
+
+    /// Legacy bare-payload JSON (schema version 0) matching
+    /// `syntheticStoredConversation()` exactly, so migration round-trips are
+    /// checkable.
+    static let syntheticConversationsLegacyJSON: String = """
+    [
+      {
+        "messages" : [
+          {
+            "agentKind" : null,
+            "conversationID" : "fixture-conversation-1",
+            "createdAt" : "2026-01-05T12:00:00Z",
+            "id" : "fixture-conversation-message-1",
+            "referencedContextItemIDs" : [],
+            "requestID" : "fixture-conversation-request-1",
+            "requestOutcome" : {
+              "completed" : {
+                "responseMessageID" : "fixture-conversation-message-2"
+              }
+            },
+            "selectedModel" : null,
+            "speaker" : "user",
+            "text" : "Synthetic fixture question.",
+            "transmission" : "sent",
+            "usage" : null
+          },
+          {
+            "agentKind" : "codex",
+            "conversationID" : "fixture-conversation-1",
+            "createdAt" : "2026-01-05T12:00:00Z",
+            "id" : "fixture-conversation-message-2",
+            "referencedContextItemIDs" : [],
+            "requestID" : "fixture-conversation-request-1",
+            "requestOutcome" : null,
+            "selectedModel" : null,
+            "speaker" : "assistant",
+            "text" : "Synthetic fixture answer.",
+            "transmission" : "sent",
+            "usage" : null
+          }
+        ],
+        "record" : {
+          "createdAt" : "2026-01-05T12:00:00Z",
+          "draftText" : null,
+          "draftUpdatedAt" : null,
+          "id" : "fixture-conversation-1",
+          "messageIDs" : [
+            "fixture-conversation-message-1",
+            "fixture-conversation-message-2"
+          ],
+          "updatedAt" : "2026-01-05T12:00:00Z"
+        }
+      }
+    ]
+    """
 }

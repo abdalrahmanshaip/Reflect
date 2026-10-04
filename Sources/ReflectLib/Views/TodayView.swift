@@ -1,357 +1,391 @@
 import SwiftUI
 
+/// Design A Today: one observed sentence, compact facts, one suggested question
+/// with the user's writing field, then evidence on request. No event list or AI
+/// controls precede the sentence and question.
 struct TodayView: View {
     @EnvironmentObject private var store: AppStore
 
-    @State private var day = Date()
-    @State private var narrative = ""
-    @State private var savedNarrative = ""
-    @State private var narrativeGeneratedAt: Date?
-    @State private var answers: [String: String] = [:]
-    @State private var selectedEventIDs: Set<String> = []
-    @State private var analysisPage = 0
-    @State private var analysisText = ""
-    @State private var analysisInfo = ""
-    @State private var analysisRunning = false
-    @State private var dirty = false
+    @State private var day: Date
+    @State private var composer: ReflectionDraftModel?
+    @State private var analysisModel: OptionalAnalysisModel?
+    @State private var isEvidenceVisible = false
+    @State private var isAnalysisExpanded = false
     @State private var selectedEvent: EvidenceEvent?
+    @State private var detailWidth: CGFloat = 0
+    /// Routes "Open in All Records" from the inspector to the full filtered list.
+    private let onOpenAllRecords: (String) -> Void
+    private let evidenceTab: TodayEvidenceInspector.Tab
+    /// Sidebar column visibility, so opening the inspector at narrow widths can
+    /// collapse the sidebar instead of squeezing the content column.
+    var sidebarVisibility: Binding<NavigationSplitViewVisibility>?
+
+    /// Opening a specific local day (sidebar Earlier route) — opening a day only
+    /// reads; stored reports are never changed by selection alone.
+    init(
+        initialDay: Date? = nil,
+        showsEvidence: Bool = false,
+        evidenceTab: TodayEvidenceInspector.Tab = .sessions,
+        analysisExpanded: Bool = false,
+        sidebarVisibility: Binding<NavigationSplitViewVisibility>? = nil,
+        onOpenAllRecords: @escaping (String) -> Void = { _ in }
+    ) {
+        _day = State(initialValue: initialDay ?? Date())
+        _isEvidenceVisible = State(initialValue: showsEvidence)
+        _isAnalysisExpanded = State(initialValue: analysisExpanded)
+        self.evidenceTab = evidenceTab
+        self.sidebarVisibility = sidebarVisibility
+        self.onOpenAllRecords = onOpenAllRecords
+    }
 
     private var dayKey: String { Fmt.dayKey(day) }
-    private var dayEvents: [EvidenceEvent] { store.events(onDay: dayKey) }
-    private var facts: DayFacts { store.dayFacts(for: dayKey) }
-    private var draft: ReportDraft { ReportGenerator.draft(for: facts) }
-    private let analysisPageSize = 25
-
-    private var analysisPageCount: Int {
-        EventPage.pageCount(total: dayEvents.count, pageSize: analysisPageSize)
-    }
-
-    private var analysisPageRange: Range<Int> {
-        EventPage.range(total: dayEvents.count, page: analysisPage, pageSize: analysisPageSize)
-    }
-
-    private var analysisPageEvents: [EvidenceEvent] {
-        let ordered = dayEvents.sorted { $0.timestamp < $1.timestamp }
-        return EventPage.items(ordered, page: analysisPage, pageSize: analysisPageSize)
-    }
+    private var isToday: Bool { dayKey == Fmt.dayKey(Date()) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    evidenceSection
-                    reportSection
-                    questionsSection
-                    analysisSection
+        let projection = store.todayProjection(for: dayKey)
+        let evidenceSignature = ReflectionDraftModel.evidenceSignature(for: projection.events)
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    GeometryReader { contentGeometry in
+                        VStack(spacing: 0) {
+                            header(availableWidth: contentGeometry.size.width)
+                            Divider()
+                            ScrollView {
+                        VStack(alignment: .leading, spacing: 26) {
+                            TodayOverviewView(overview: projection.overview)
+                            if let composer {
+                                ReflectionComposerView(model: composer)
+                            }
+                            evidenceRow(projection: projection)
+                            analysisSection(projection: projection)
+                            if let legacy = projection.legacyNarrative {
+                                legacyDraftSection(legacy)
+                            }
+                        }
+                            .padding(.horizontal, 48)
+                            .padding(.top, 34)
+                            .padding(.bottom, 44)
+                            .frame(maxWidth: 700, alignment: .leading)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            }
+                        }
+                    }
                 }
-                .padding(20)
+                if isEvidenceVisible {
+                    Divider()
+                    TodayEvidenceInspector(
+                        dayKey: dayKey,
+                        events: projection.events,
+                        initialTab: evidenceTab,
+                        onClose: { closeEvidence() },
+                        onOpenAllRecords: onOpenAllRecords,
+                        projectedGroups: projection.sessions,
+                        projectedHourLanes: projection.hourLanes
+                    )
+                }
+            }
+            .onChange(of: isEvidenceVisible) { visible in
+                guard visible else { return }
+                scheduleSidebarCheck()
+            }
+            .onChange(of: geometry.size.width) { width in
+                detailWidth = width
+            }
+            .onAppear {
+                detailWidth = geometry.size.width
+                if isEvidenceVisible {
+                    // Launch-time opens never fire onChange; re-check after the
+                    // window has settled at its final size.
+                    scheduleSidebarCheck()
+                }
             }
         }
-        .onAppear(perform: loadFromStore)
-        .onChange(of: day) { _ in loadFromStore() }
+        .onAppear(perform: loadComposer)
+        .onChange(of: day) { _ in loadComposer() }
+        .onChange(of: evidenceSignature) { signature in
+            // Import completed while Today stayed visible: mark the evidence
+            // context changed without touching the active question or draft.
+            composer?.noteEvidenceChanged(to: signature)
+        }
         .sheet(item: $selectedEvent) { event in
             EvidenceSheet(event: event)
         }
     }
 
-    private var header: some View {
-        HStack {
-            DatePicker("Day", selection: $day, displayedComponents: .date)
-                .datePickerStyle(.compact)
-            Spacer()
-            if dirty {
-                Text("Unsaved changes")
+    // MARK: Header
+
+    private func header(availableWidth: CGFloat) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(isToday ? "Today" : Fmt.sidebarDayLabel(dayKey))
+                    .font(.headline)
+                Text(Fmt.fullDate(day))
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.secondary)
             }
-            Button("Save report") { saveReport() }
-                .disabled(!dirty)
-                .keyboardShortcut("s", modifiers: .command)
+            Spacer()
+            if let composer, availableWidth > 560 {
+                ReflectionSaveStatusView(model: composer)
+            }
+            Button {
+                isEvidenceVisible.toggle()
+            } label: {
+                if availableWidth > 520 {
+                    Label("View Evidence", systemImage: "doc.text.magnifyingglass")
+                        .labelStyle(.titleAndIcon)
+                } else {
+                    Label("View Evidence", systemImage: "doc.text.magnifyingglass")
+                        .labelStyle(.iconOnly)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .background(isEvidenceVisible ? Color.secondary.opacity(0.12) : Color.clear)
+            .accessibilityLabel(isEvidenceVisible ? "Hide evidence inspector" : "Show evidence inspector")
+            HStack(spacing: 0) {
+                Button {
+                    day = Calendar.current.date(byAdding: .day, value: -1, to: day) ?? day
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: 26, height: 22)
+                }
+                .accessibilityLabel("Previous day")
+                .reflectClickableHover(RoundedRectangle(cornerRadius: 5))
+                Divider()
+                    .frame(height: 14)
+                Button {
+                    day = Calendar.current.date(byAdding: .day, value: 1, to: day) ?? day
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .frame(width: 26, height: 22)
+                        .foregroundStyle(isToday ? Color(nsColor: .disabledControlTextColor) : Color(nsColor: .controlTextColor))
+                }
+                .disabled(isToday)
+                .accessibilityLabel("Next day")
+                .reflectClickableHover(RoundedRectangle(cornerRadius: 5))
+            }
+            .buttonStyle(.plain)
+            .background(Capsule().fill(ReflectPalette.button))
+            .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Previous or next day")
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 22)
         .padding(.vertical, 12)
     }
 
-    private var evidenceSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Observed evidence for \(dayKey)", systemImage: "doc.text.magnifyingglass")
-                .font(.headline)
-            if dayEvents.isEmpty {
-                Text("No evidence imported for this day. Use Sources to start an import; nothing is imported automatically.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                HStack {
-                    ForEach(store.countBySource(for: dayEvents), id: \.0) { kind, count in
-                        SourceCountBadge(kind: kind, count: count)
-                    }
-                }
-                Text("\(dayEvents.count) event(s). Click a row for evidence details.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                ForEach(dayEvents.sorted { $0.timestamp < $1.timestamp }.prefix(12)) { event in
-                    EventRow(event: event, attribution: store.effectiveAttribution(for: event))
-                        .contentShape(Rectangle())
-                        .onTapGesture { selectedEvent = event }
-                }
-                if dayEvents.count > 12 {
-                    Text("… and \(dayEvents.count - 12) more. See Timeline for the full list.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
+    // MARK: Evidence on request
 
-    private var reportSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label("Daily report", systemImage: "square.and.pencil")
-                    .font(.headline)
-                if let generatedAt = narrativeGeneratedAt {
-                    Text("draft generated \(Fmt.time(generatedAt))")
+    private func evidenceRow(projection: TodayRouteProjection) -> some View {
+        Button {
+            isEvidenceVisible.toggle()
+        } label: {
+            HStack(spacing: 12) {
+                ObservedMark()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("View evidence")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(projection.evidenceSubtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Generate draft") {
-                    narrative = draft.narrative
-                    narrativeGeneratedAt = Date()
-                    dirty = true
-                }
-                .disabled(dayEvents.isEmpty)
-            }
-            if draft.insufficientEvidence {
-                InsufficientEvidenceBanner(reason: draft.reason ?? "Insufficient evidence.")
-            }
-            TextEditor(text: $narrative)
-                .font(.body)
-                .frame(minHeight: 110)
-                .border(Color.secondary.opacity(0.25))
-                .onChange(of: narrative) { value in
-                    if ReportEditTracking.narrativeChanged(current: value, saved: savedNarrative) {
-                        dirty = true
-                    }
-                }
-        }
-    }
-
-    private var questionsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("Coaching questions (deterministic, grounded in this day's evidence)", systemImage: "questionmark.circle")
-                .font(.headline)
-            if draft.insufficientEvidence {
-                Text(draft.reason ?? "No questions without enough evidence.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(draft.questions) { question in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(alignment: .top, spacing: 6) {
-                            EvidenceLabelBadge(label: .inference)
-                            Text(question.text)
-                                .font(.callout.weight(.medium))
-                        }
-                        TextEditor(text: bindingForAnswer(question.id))
-                            .font(.body)
-                            .frame(minHeight: 54)
-                            .border(Color.secondary.opacity(0.2))
-                    }
-                }
-                Text("Your answers are saved with the report and kept separate from observed evidence.")
+                Image(systemName: isEvidenceVisible ? "chevron.left" : "chevron.right")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .textBackgroundColor)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.secondary.opacity(0.18), lineWidth: 0.5)
+            )
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .reflectClickableHover(RoundedRectangle(cornerRadius: 10))
+        .accessibilityLabel(isEvidenceVisible ? "Hide evidence" : "View evidence")
+        .accessibilityHint(projection.evidenceSubtitle)
     }
 
-    private var analysisSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("AI analysis (explicit; nothing is sent unless you run it)", systemImage: "paperplane")
-                .font(.headline)
-            Text(statusDescription)
+    // MARK: Optional AI analysis (secondary; closed by default)
+
+    private func analysisSection(projection: TodayRouteProjection) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                SuggestedMark()
+                analysisStatusLine
+            }
+            DisclosureGroup(isExpanded: $isAnalysisExpanded) {
+                if let analysisModel {
+                    OptionalAnalysisView(
+                        model: analysisModel,
+                        events: projection.sortedEvents,
+                        onAttach: { text in
+                            composer?.attachAnalysis(text)
+                        }
+                    )
+                    .padding(.top, 12)
+                }
+            } label: {
+                Text("Analyze this day's evidence…")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(ReflectPalette.accent)
+            }
+            .accessibilityLabel("Analyze this day's evidence with optional AI analysis")
+        }
+        .padding(.top, 16)
+    }
+
+    /// Whether the stored report carries an attached analysis result.
+    private var hasStoredAnalysis: Bool {
+        !(store.report(for: dayKey).analysisResult ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Truthful privacy status for this day's analysis surface. The line view
+    /// subscribes directly to the analysis model's published run state via
+    /// @ObservedObject, so it refreshes on every run-state transition (running,
+    /// finished, failed) instead of waiting for an unrelated parent re-render.
+    @ViewBuilder
+    private var analysisStatusLine: some View {
+        if let analysisModel {
+            AnalysisStatusLine(
+                model: analysisModel,
+                hasStoredAnalysis: hasStoredAnalysis,
+                aiEnabled: store.settings.aiEnabled
+            )
+        } else {
+            let line = AnalysisPrivacyNote.text(aiEnabled: store.settings.aiEnabled, state: .noAttachedResult)
+            Text(line)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                .accessibilityLabel(line)
+        }
+    }
 
-            if !dayEvents.isEmpty {
-                Text("Select the evidence records to include. Only selected records are ever sent:")
-                    .font(.callout)
+    /// Subscribes to the model's published operation state and derives the
+    /// send state from storage plus that state, so the wording stays accurate
+    /// across disabled, configured-not-run, running, run-completed, failed,
+    /// and restored-attached days.
+    private struct AnalysisStatusLine: View {
+        @ObservedObject var model: OptionalAnalysisModel
+        let hasStoredAnalysis: Bool
+        let aiEnabled: Bool
 
-                HStack {
-                    Text("Showing \(analysisPageRange.lowerBound + 1)–\(analysisPageRange.upperBound) of \(dayEvents.count) · \(selectedEventIDs.count) selected")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if analysisPageCount > 1 {
-                        Button("Previous") {
-                            analysisPage = max(0, analysisPage - 1)
-                        }
-                        .disabled(analysisPage == 0)
-                        Text("\(analysisPage + 1) of \(analysisPageCount)")
-                            .font(.caption.monospacedDigit())
-                        Button("Next") {
-                            analysisPage = min(analysisPageCount - 1, analysisPage + 1)
-                        }
-                        .disabled(analysisPage >= analysisPageCount - 1)
-                    }
-                }
+        private var line: String {
+            AnalysisPrivacyNote.text(
+                aiEnabled: aiEnabled,
+                state: AnalysisPrivacyNote.sendState(hasStoredAnalysis: hasStoredAnalysis, runState: model.runState)
+            )
+        }
 
-                ForEach(analysisPageEvents) { event in
-                    Toggle(isOn: selectionBinding(for: event)) {
-                        EventRow(event: event, attribution: store.effectiveAttribution(for: event))
-                    }
-                }
-                Text("Rough estimate: \(estimateDescription)")
+        var body: some View {
+            Text(line)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(line)
+        }
+    }
+
+    // MARK: Legacy generated draft (secondary path to older report content)
+
+    private func legacyDraftSection(_ legacy: LegacyNarrativeProjection) -> some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Generated by Reflect — never counted as your reflection.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-
-                HStack {
-                    Button("Run analysis on selected evidence") { runAnalysis() }
-                        .disabled(!canRunAnalysis)
-                    if analysisRunning {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                    }
-                }
-            }
-
-            if !analysisText.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    EvidenceLabelBadge(label: .inference)
-                    TextEditor(text: .constant(analysisText))
-                        .font(.body)
-                        .frame(minHeight: 120)
-                        .border(Color.secondary.opacity(0.2))
-                    Text(analysisInfo)
-                        .font(.caption)
+                Text(legacy.text)
+                    .font(.callout)
+                    .textSelection(.enabled)
+                if let at = legacy.generatedAt {
+                    Text("Generated at \(Fmt.dateTime(at)).")
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Button("Attach result to this day's report") {
-                        attachAnalysisToReport()
-                    }
                 }
             }
+            .padding(.top, 8)
+        } label: {
+            Text("Earlier generated draft for this day")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
     }
 
     // MARK: Behavior
 
-    private var statusDescription: String {
-        switch store.aiStatus() {
-        case .disabled:
-            return "AI analysis is disabled (default). No network calls are made. Enable and configure it in Settings."
-        case .incomplete(let reason):
-            return "AI is enabled but not fully configured: \(reason) Configure it in Settings."
-        case .ready:
-            return "Configured. This has not been verified against a live endpoint until you run an analysis."
+    private func closeEvidence() {
+        isEvidenceVisible = false
+    }
+
+    /// Three columns cannot fit a narrow window: collapse the sidebar so the
+    /// day column stays readable when the inspector is open. When the width is
+    /// comfortably wide, all columns come back.
+    private func scheduleSidebarCheck() {
+        collapseSidebarForInspector(detailWidth)
+        // Re-check after the window settles at its final size (launch-time opens).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            if isEvidenceVisible {
+                collapseSidebarForInspector(detailWidth)
+            }
         }
     }
 
-    private var canRunAnalysis: Bool {
-        if case .ready = store.aiStatus() {
-            return !selectedEventIDs.isEmpty && !analysisRunning
+    private func collapseSidebarForInspector(_ availableWidth: CGFloat) {
+        guard let sidebarVisibility else { return }
+        // Thresholds compare the DETAIL width: after collapsing, the detail
+        // grows to the full window width, so only >= 900 counts as "room for
+        // three columns"; otherwise the check would undo its own collapse.
+        if availableWidth < 660 {
+            sidebarVisibility.wrappedValue = .detailOnly
+        } else if availableWidth >= 900 {
+            sidebarVisibility.wrappedValue = .all
         }
-        return false
     }
 
-    private var estimateDescription: String {
-        let selected = dayEvents.filter { selectedEventIDs.contains($0.id) }
-        let payload = AnalysisService.buildPayload(
-            model: store.settings.providerModel.isEmpty ? "model" : store.settings.providerModel,
-            events: selected,
-            instruction: AnalysisService.defaultInstruction,
-            maxPreviewCharacters: store.settings.maxPreviewCharacters
-        )
-        let serialized = (try? JSONSerialization.data(withJSONObject: payload))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
-        let tokens = AnalysisService.estimateTokens(serialized)
-        var text = "about \(tokens) input tokens"
-        let settings = store.settings
-        if settings.pricePerMillionInput > 0 {
-            let cost = Double(tokens) / 1_000_000 * settings.pricePerMillionInput
-            text += ", roughly \(Fmt.usd(cost)) at the configured input price (output not included)"
-        }
-        return text
-    }
-
-    private func loadFromStore() {
+    /// Loads (or reloads) the composer and analysis model for the selected day.
+    /// The previous day's pending autosave is flushed first, so immediate day
+    /// switches never lose drafted text.
+    private func loadComposer() {
+        composer?.flushPendingSave()
+        let store = self.store
         let report = store.report(for: dayKey)
-        savedNarrative = report.narrative
-        narrative = report.narrative
-        narrativeGeneratedAt = report.narrativeGeneratedAt
-        answers = report.answers.mapValues(\.text)
-        analysisText = report.analysisResult ?? ""
-        analysisInfo = report.analysisGeneratedAt.map { "Saved result from \(Fmt.dateTime($0))." } ?? ""
-        selectedEventIDs = []
-        analysisPage = 0
-        dirty = false
-    }
-
-    private func saveReport() {
-        var report = store.report(for: dayKey)
-        report.narrative = narrative
-        report.narrativeGeneratedAt = narrativeGeneratedAt
-        var merged = report.answers
-        for (id, text) in answers {
-            merged[id] = AnswerEntry(text: text, updatedAt: Date())
-        }
-        report.answers = merged
-        store.saveReport(report)
-        savedNarrative = narrative
-        dirty = false
-    }
-
-    private func bindingForAnswer(_ id: String) -> Binding<String> {
-        Binding(
-            get: { answers[id] ?? "" },
-            set: { answers[id] = $0; dirty = true }
+        let overview = store.dayOverview(for: dayKey)
+        composer = ReflectionDraftModel(
+            dayKey: dayKey,
+            report: report,
+            questions: overview.questions,
+            evidenceSignature: ReflectionDraftModel.evidenceSignature(for: store.events(onDay: dayKey)),
+            save: { store.saveReport($0) }
         )
-    }
-
-    private func selectionBinding(for event: EvidenceEvent) -> Binding<Bool> {
-        Binding(
-            get: { selectedEventIDs.contains(event.id) },
-            set: { enabled in
-                if enabled { selectedEventIDs.insert(event.id) } else { selectedEventIDs.remove(event.id) }
+        // Analysis state is day-scoped; closures hold the store reference and
+        // only start a verified agent process inside an explicit Run.
+        analysisModel = OptionalAnalysisModel(
+            statusProvider: { store.aiStatus() },
+            settingsProvider: { store.settings },
+            agentProvider: {
+                guard let selected = store.settings.analysisAgent else { return nil }
+                return store.analysisAgentStatus(for: selected)
+            },
+            runner: { selected, settings, agent in
+                // Corrections stay separately persisted; only the corrections
+                // for the explicitly selected records reach the payload, and
+                // each observed attribution is serialized unchanged.
+                try AnalysisService().run(
+                    selectedEvents: selected,
+                    settings: settings,
+                    agent: agent,
+                    corrections: store.corrections
+                )
             }
         )
-    }
-
-    private func runAnalysis() {
-        let selected = dayEvents.filter { selectedEventIDs.contains($0.id) }
-        guard let apiKey = store.secrets.secret(account: AppConstants.keychainAccount), !apiKey.isEmpty else {
-            store.lastError = "No API key is stored in Keychain."
-            return
-        }
-        analysisRunning = true
-        let settings = store.settings
-        Task {
-            defer { analysisRunning = false }
-            do {
-                let result = try await AnalysisService().run(selectedEvents: selected, settings: settings, apiKey: apiKey)
-                analysisText = result.text
-                var info = "Model \(result.model) at \(result.endpoint). "
-                if let input = result.inputTokens, let output = result.outputTokens {
-                    info += "Tokens: \(input) in / \(output) out "
-                    info += result.usedRequestedUsage ? "(as requested by provider)." : "(rough local estimate)."
-                }
-                if let cost = result.estimatedCostUSD {
-                    info += " Estimated cost: \(Fmt.usd(cost))."
-                }
-                analysisInfo = info
-                dirty = true
-            } catch {
-                store.lastError = "Analysis failed: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func attachAnalysisToReport() {
-        var report = store.report(for: dayKey)
-        report.analysisResult = analysisText
-        report.analysisGeneratedAt = Date()
-        store.saveReport(report)
+        // A previously attached result is surfaced read-only from the stored
+        // report — restore reads only this report, never the Keychain/network.
+        analysisModel?.restoreAttached(from: report)
     }
 }
 

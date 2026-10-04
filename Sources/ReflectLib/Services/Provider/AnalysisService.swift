@@ -8,11 +8,12 @@ struct AnalysisResult {
     let model: String
     let endpoint: String
     let usedRequestedUsage: Bool
+    let agent: AnalysisAgentKind
 }
 
-/// Sends an explicit, user-triggered analysis request to an OpenAI-compatible
-/// chat-completions endpoint. Only the events the user selected are serialized.
-/// This is the only code path in the app that can touch the network.
+/// Runs only the selected evidence through a verified, authenticated local CLI.
+/// The CLI receives the evidence over stdin and never receives a path to the
+/// user's evidence store or repository.
 struct AnalysisService {
     enum Status: Equatable {
         case disabled
@@ -20,62 +21,36 @@ struct AnalysisService {
         case ready
     }
 
-    // MARK: Status
-
-    static func status(settings: AppSettings, hasKey: Bool) -> Status {
+    static func status(settings: AppSettings, agentAvailable: Bool) -> Status {
         guard settings.aiEnabled else { return .disabled }
-        if settings.providerEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return .incomplete(reason: "Endpoint is missing.")
+        guard settings.analysisAgent != nil else {
+            return .incomplete(reason: "Choose an authenticated analysis agent.")
         }
-        if settings.providerModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return .incomplete(reason: "Model is missing.")
-        }
-        if !hasKey {
-            return .incomplete(reason: "API key is not stored in Keychain.")
+        guard agentAvailable else {
+            return .incomplete(reason: "The selected agent is not currently authenticated.")
         }
         return .ready
     }
 
-    // MARK: URL handling
+    static let defaultInstruction = """
+    You are a cautious engineering-growth coach. Work only from the evidence lines provided. \
+    Do not use tools, inspect files, inspect the working directory, or access any external service. \
+    Distinguish clearly between observed facts and your interpretations. Do not assert human \
+    authorship from metadata. If evidence is insufficient for a conclusion, say so instead of \
+    producing a score or ranking.
+    """
 
-    static func completionsURL(from endpoint: String) -> URL? {
-        let trimmed = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(),
-              scheme == "https" || scheme == "http", url.host() != nil else { return nil }
-
-        var path = url.path
-        while path.hasSuffix("/") { path.removeLast() }
-        if path.hasSuffix("/chat/completions") {
-            // Already the full path.
-        } else if path.hasSuffix("/v1") {
-            path += "/chat/completions"
-        } else {
-            path += "/v1/chat/completions"
-        }
-        var components = URLComponents()
-        components.scheme = scheme
-        components.host = url.host()
-        components.port = url.port
-        components.path = path
-        return components.url
-    }
-
-    // MARK: Payload
-
-    static func buildPayload(
-        model: String,
+    static func buildInput(
         events: [EvidenceEvent],
-        instruction: String,
-        maxPreviewCharacters: Int
-    ) -> [String: Any] {
-        let systemMessage: String
-        if instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            systemMessage = defaultInstruction
-        } else {
-            systemMessage = instruction
-        }
-
-        var lines = ["Evidence records selected by the user (one per line):"]
+        maxPreviewCharacters: Int,
+        instruction: String = AnalysisService.defaultInstruction,
+        corrections: [AttributionCorrection] = []
+    ) -> Data {
+        let selectedIDs = Set(events.map(\.id))
+        // Only corrections for selected records are ever serialized; the
+        // observed labels below stay exactly as recorded at import time.
+        let applicableCorrections = corrections.filter { selectedIDs.contains($0.eventId) }
+        var lines = [instruction, "", "Selected evidence records (one per line):"]
         for event in events {
             let time = ISO8601DateFormatter().string(from: event.timestamp)
             var line = "- id=\(event.id) | source=\(event.sourceName) | time=\(time) | type=\(event.kind.label) | observed=\(event.observedAttribution.label)"
@@ -84,126 +59,91 @@ struct AnalysisService {
             }
             lines.append(line)
         }
-
-        return [
-            "model": model,
-            "stream": false,
-            "messages": [
-                ["role": "system", "content": systemMessage],
-                ["role": "user", "content": lines.joined(separator: "\n")]
-            ]
-        ]
+        if !applicableCorrections.isEmpty {
+            lines.append("")
+            lines.append("User attribution corrections (explicit user decisions, kept separate from the observed records above; the observed labels are unchanged):")
+            for correction in applicableCorrections {
+                guard let event = events.first(where: { $0.id == correction.eventId }) else { continue }
+                lines.append("- id=\(event.id) | your correction=\(correction.attribution.label) (user replaces the observed label \(event.observedAttribution.label) for this analysis)")
+            }
+        }
+        return Data(lines.joined(separator: "\n").utf8)
     }
-
-    static let defaultInstruction = """
-    You are a cautious engineering-growth coach. Work only from the evidence lines provided. \
-    Distinguish clearly between observed facts and your interpretations. Do not assert human \
-    authorship from metadata. If evidence is insufficient for a conclusion, say so instead of \
-    producing a score or ranking.
-    """
-
-    // MARK: Usage estimation
-
-    static func estimateTokens(_ text: String) -> Int {
-        text.count / 4
-    }
-
-    // MARK: Request
 
     func run(
         selectedEvents: [EvidenceEvent],
         settings: AppSettings,
-        apiKey: String,
-        session: URLSession = .shared,
-        now: Date = Date()
-    ) async throws -> AnalysisResult {
-        guard let url = Self.completionsURL(from: settings.providerEndpoint) else {
-            throw AnalysisError.invalidEndpoint
-        }
-        guard !apiKey.isEmpty else { throw AnalysisError.missingKey }
+        agent: AnalysisAgentStatus,
+        corrections: [AttributionCorrection] = [],
+        processRunner: AnalysisProcessRunning = DefaultAnalysisProcessRunner(),
+        temporaryDirectory: URL? = nil
+    ) throws -> AnalysisResult {
         guard !selectedEvents.isEmpty else { throw AnalysisError.noEvidenceSelected }
+        guard settings.aiEnabled else { throw AnalysisError.disabled }
+        guard agent.isReady, let executableURL = agent.executableURL else {
+            throw AnalysisError.agentUnavailable
+        }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 120
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let workingDirectory: URL
+        let ownsWorkingDirectory: Bool
+        if let temporaryDirectory {
+            workingDirectory = temporaryDirectory
+            ownsWorkingDirectory = false
+        } else {
+            workingDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("Reflect-analysis-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: workingDirectory, withIntermediateDirectories: true)
+            ownsWorkingDirectory = true
+        }
+        defer {
+            if ownsWorkingDirectory {
+                try? FileManager.default.removeItem(at: workingDirectory)
+            }
+        }
 
-        let payload = Self.buildPayload(
-            model: settings.providerModel,
-            events: selectedEvents,
-            instruction: Self.defaultInstruction,
-            maxPreviewCharacters: settings.maxPreviewCharacters
+        let model = settings.model(for: agent.kind)
+        let invocation = AnalysisProcessInvocation(
+            executableURL: executableURL,
+            arguments: agent.kind.analysisArguments(model: model),
+            input: Self.buildInput(
+                events: selectedEvents,
+                maxPreviewCharacters: settings.maxPreviewCharacters,
+                corrections: corrections
+            ),
+            workingDirectory: workingDirectory,
+            environment: AnalysisProcessEnvironment.sanitized(),
+            timeout: 120,
+            outputLimit: 64 * 1024
         )
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
-
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw AnalysisError.badResponse }
-
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw AnalysisError.httpStatus(http.statusCode, JSONParsing.cappedPreview(body, limit: 300))
-        }
-
-        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let message = choices.first?["message"] as? [String: Any],
-              let text = message["content"] as? String else {
-            throw AnalysisError.unexpectedResponseFormat
-        }
-
-        let usage = json["usage"] as? [String: Any]
-        let requestedInput = usage?["prompt_tokens"] as? Int
-        let requestedOutput = usage?["completion_tokens"] as? Int
-
-        let inputTokens: Int
-        let outputTokens: Int
-        var usedRequested = false
-        switch settings.usageMode {
-        case .requested where requestedInput != nil && requestedOutput != nil:
-            inputTokens = requestedInput ?? 0
-            outputTokens = requestedOutput ?? 0
-            usedRequested = true
-        default:
-            let serialized = (try? JSONSerialization.data(withJSONObject: payload, options: []))
-                .flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            inputTokens = Self.estimateTokens(serialized)
-            outputTokens = Self.estimateTokens(text)
-        }
-
-        var cost: Double?
-        if settings.pricePerMillionInput > 0 || settings.pricePerMillionOutput > 0 {
-            cost = Double(inputTokens) / 1_000_000 * settings.pricePerMillionInput
-                + Double(outputTokens) / 1_000_000 * settings.pricePerMillionOutput
-        }
+        let result = try processRunner.run(invocation)
+        let text = String(decoding: result.stdout, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw AnalysisError.emptyOutput }
 
         return AnalysisResult(
             text: text,
-            inputTokens: inputTokens,
-            outputTokens: outputTokens,
-            estimatedCostUSD: cost,
-            model: settings.providerModel,
-            endpoint: url.absoluteString,
-            usedRequestedUsage: usedRequested
+            inputTokens: nil,
+            outputTokens: nil,
+            estimatedCostUSD: nil,
+            model: model?.isEmpty == false ? model! : "Agent default",
+            endpoint: "",
+            usedRequestedUsage: false,
+            agent: agent.kind
         )
     }
 
     enum AnalysisError: LocalizedError {
-        case invalidEndpoint
-        case missingKey
+        case disabled
+        case agentUnavailable
         case noEvidenceSelected
-        case badResponse
-        case httpStatus(Int, String)
-        case unexpectedResponseFormat
+        case emptyOutput
 
         var errorDescription: String? {
             switch self {
-            case .invalidEndpoint: return "The endpoint URL is not valid."
-            case .missingKey: return "No API key is stored in Keychain."
+            case .disabled: return "AI analysis is disabled."
+            case .agentUnavailable: return "The selected analysis agent is not ready."
             case .noEvidenceSelected: return "Select at least one evidence record to send."
-            case .badResponse: return "The server response was not HTTP."
-            case .httpStatus(let code, let body): return "Server returned HTTP \(code): \(body)"
-            case .unexpectedResponseFormat: return "The response format was not recognized."
+            case .emptyOutput: return "The selected analysis agent returned no result."
             }
         }
     }

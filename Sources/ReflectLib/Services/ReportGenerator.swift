@@ -9,6 +9,9 @@ struct DayFacts {
 struct CoachingQuestion: Identifiable, Hashable {
     let id: String
     let text: String
+    /// Names the records the question came from. Shown under the question so the
+    /// question itself can stay plain instead of restating counts like a score.
+    let basis: String
 }
 
 struct ReportDraft {
@@ -67,16 +70,19 @@ enum ReportGenerator {
         var questions: [CoachingQuestion] = []
         questions.append(CoachingQuestion(
             id: "\(facts.dayKey)-q1",
-            text: "Evidence shows \(total) events from \(bySource.count) source(s) — \(sourceSummary). Which task took the most attention today, and what would you do differently next time?"
+            text: "Which task took the most attention, and what would you do differently next time?",
+            basis: "Based on \(total) record(s) from \(bySource.count) source(s): \(sourceSummary)."
         ))
         questions.append(CoachingQuestion(
             id: "\(facts.dayKey)-q2",
-            text: "Evidence for \(facts.dayKey) structurally attributes \(agentCount) events to the agent and leaves \(unclearCount) unclear. Where was the key decision made — by you or by the tool — and what evidence tells you that?"
+            text: "When a tool suggested something, how did you decide whether to take it — and is there a call you would make differently now?",
+            basis: "Based on records in \(facts.dayKey) recorded with the agent role (\(agentCount)) or left unclear (\(unclearCount)); observed roles, not authorship."
         ))
         if let commits = bySource[.gitLocal]?.count, commits > 0 {
             questions.append(CoachingQuestion(
                 id: "\(facts.dayKey)-q3",
-                text: "\(commits) commit(s) are recorded for this day (commit metadata only; authorship is not asserted). Which change would you defend in a code review, and why?"
+                text: "Some commits are recorded for this day: which change would you defend in a code review, and why?",
+                basis: "Based on \(commits) commit(s) (commit metadata only; authorship is not asserted)."
             ))
         }
 

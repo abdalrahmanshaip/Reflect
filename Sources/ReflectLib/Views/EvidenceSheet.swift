@@ -20,51 +20,58 @@ struct EvidenceSheet: View {
                     .keyboardShortcut(.cancelAction)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                metadataRow("Source", event.sourceName)
-                metadataRow("Type", event.kind.label)
-                metadataRow("Timestamp", Fmt.dateTime(event.timestamp) + (event.timestampApproximate ? " (approximate; from file modification time)" : ""))
-                metadataRow("Evidence ID", event.id)
-                metadataRow("Evidence path", evidencePathText)
-                metadataRow("Observed attribution", "\(event.observedAttribution.label) — \(event.observedAttributionNote)")
-                metadataRow("Imported at", Fmt.dateTime(event.importedAt))
-                if !event.detail.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Preview (stored locally, capped)")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        metadataRow("Source", event.sourceName)
+                        metadataRow("Type", event.kind.label)
+                        metadataRow("Timestamp", Fmt.dateTime(event.timestamp) + (event.timestampApproximate ? " (approximate; from file modification time)" : ""))
+                        metadataRow("Evidence ID", event.id)
+                        metadataRow("Evidence path", evidencePathText)
+                        metadataRow("Observed attribution", "\(event.observedAttribution.label) — \(event.observedAttributionNote)")
+                        metadataRow("Imported at", Fmt.dateTime(event.importedAt))
+                        if !event.detail.isEmpty {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Preview (stored locally, capped)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(event.detail)
+                                    .font(.callout)
+                                    .textSelection(.enabled)
+                            }
+                            .padding(.leading, 146)
+                        }
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Your attribution correction (stored separately from imported facts)")
+                            .font(.callout.weight(.medium))
+                        Picker("Attribution", selection: $correction) {
+                            Text("No correction (keep observed)").tag(Attribution?.none)
+                            ForEach(Attribution.allCases) { value in
+                                Text(value.label).tag(Attribution?.some(value))
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: correction) { value in
+                            store.setCorrection(value, for: event.id)
+                        }
+                        Text("Corrections survive re-imports and event deletion. They never overwrite the observed record.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text(event.detail)
-                            .font(.callout)
-                            .textSelection(.enabled)
+                    }
+
+                    HStack {
+                        Button("Open Evidence (reveal in Finder)") { revealInFinder() }
+                        Button("Open with default app") { openFile() }
+                        Spacer()
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Your attribution correction (stored separately from imported facts)")
-                    .font(.callout.weight(.medium))
-                Picker("Attribution", selection: $correction) {
-                    Text("No correction (keep observed)").tag(Attribution?.none)
-                    ForEach(Attribution.allCases) { value in
-                        Text(value.label).tag(Attribution?.some(value))
-                    }
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: correction) { value in
-                    store.setCorrection(value, for: event.id)
-                }
-                Text("Corrections survive re-imports and event deletion. They never overwrite the observed record.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack {
-                Button("Open Evidence (reveal in Finder)") { revealInFinder() }
-                Button("Open with default app") { openFile() }
-                Spacer()
-            }
+            .frame(maxHeight: 560)
         }
         .padding(20)
         .frame(width: 560)

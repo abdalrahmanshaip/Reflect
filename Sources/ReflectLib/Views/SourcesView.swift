@@ -6,12 +6,21 @@ struct SourcesView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 8) {
+                    ObservedMark()
+                    Text("Sources")
+                        .font(.callout.weight(.semibold))
+                    Text("imports run only when you start them")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+
                 HStack {
                     Button("Import all available sources") {
                         store.importAllAvailable()
                     }
-                    .disabled(store.importing.isEmpty == false && store.importing.count == SourceKind.allCases.count)
                     Spacer()
                     Button("Refresh availability") {
                         store.refreshAvailability()
@@ -35,8 +44,13 @@ struct SourcesView: View {
                     sourceCard(kind)
                 }
             }
-            .padding(20)
+            .padding(.horizontal, 48)
+            .padding(.top, 30)
+            .padding(.bottom, 44)
+            .frame(maxWidth: 700, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
+        .background(ReflectPalette.page)
         .navigationTitle("Sources")
     }
 
@@ -73,6 +87,7 @@ struct SourcesView: View {
                         .font(.callout)
                 }
             }
+            .accessibilityElement(children: .contain)
 
             if let note = availability?.note {
                 Text(note)
@@ -85,6 +100,10 @@ struct SourcesView: View {
                     .foregroundStyle(.orange)
             }
 
+            if let result = store.importResults[kind] {
+                importResultRow(result)
+            }
+
             if kind == .gitLocal {
                 gitControls
             } else {
@@ -95,7 +114,11 @@ struct SourcesView: View {
             Divider()
         }
         .padding(12)
-        .background(Color.secondary.opacity(0.05))
+        .background(ReflectPalette.card)
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(ReflectPalette.outline, lineWidth: 0.5)
+        }
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
@@ -126,25 +149,61 @@ struct SourcesView: View {
             .clipShape(Capsule())
     }
 
-    private func isImportAllowed(_ kind: SourceKind, availability: SourceAvailability?) -> Bool {
-        guard !store.importing.contains(kind) else { return false }
-        guard store.settings.enabledSources.contains(kind) else { return false }
-        if kind == .gitLocal {
-            return !(store.settings.gitRepositoryPath ?? "").isEmpty
+    /// This source's own retained import outcome. Safe status only: source
+    /// name, record counts, and honest state — never payload text.
+    private func importResultRow(_ result: ImportSourceResult) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: resultIcon(result.status))
+                .font(.caption2.bold())
+            Text(result.message)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        return kind.formatVerified
+        .font(.caption)
+        .foregroundStyle(resultColor(result.status))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func resultIcon(_ status: ImportSourceResult.Status) -> String {
+        switch status {
+        case .imported: return "checkmark.circle"
+        case .importerNote: return "info.circle"
+        case .retryableSaveFailure, .manifestSaveFailed: return "exclamationmark.triangle"
+        }
+    }
+
+    private func resultColor(_ status: ImportSourceResult.Status) -> Color {
+        switch status {
+        case .imported: return .green
+        case .importerNote: return .secondary
+        case .retryableSaveFailure: return .red
+        case .manifestSaveFailed: return .orange
+        }
+    }
+
+    private func isImportAllowed(_ kind: SourceKind, availability: SourceAvailability?) -> Bool {
+        ImportRules.isImportAllowed(
+            kind: kind,
+            importing: store.importing,
+            enabledSources: store.settings.enabledSources,
+            gitRepositoryPath: store.settings.gitRepositoryPath,
+            formatVerified: kind.formatVerified
+        )
     }
 
     private func enabledBinding(_ kind: SourceKind) -> Binding<Bool> {
         Binding(
             get: { store.settings.enabledSources.contains(kind) },
             set: { enabled in
-                if enabled {
-                    store.settings.enabledSources.insert(kind)
-                } else {
-                    store.settings.enabledSources.remove(kind)
+                // Staged through the store: a failed preference write stays
+                // unpublished and the toggle re-reads the durable value.
+                store.updateSettings { settings in
+                    if enabled {
+                        settings.enabledSources.insert(kind)
+                    } else {
+                        settings.enabledSources.remove(kind)
+                    }
                 }
-                store.persistSettings()
             }
         )
     }
@@ -171,8 +230,7 @@ struct SourcesView: View {
         panel.message = "Choose a local git repository. Reflect reads commit metadata read-only."
         panel.directoryURL = store.settings.gitRepositoryPath.map { URL(fileURLWithPath: $0) }
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        store.settings.gitRepositoryPath = url.path
-        store.persistSettings()
+        store.updateSettings { $0.gitRepositoryPath = url.path }
         store.refreshAvailability()
     }
 }

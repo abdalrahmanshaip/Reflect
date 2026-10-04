@@ -1,7 +1,9 @@
 import Foundation
 import Security
 
-protocol SecretStore {
+/// Storage abstraction for provider secrets. Conformances decide where the
+/// secret lives (Keychain in the app, memory in test fixtures).
+public protocol SecretStore {
     func secret(account: String) -> String?
     func setSecret(_ value: String, account: String) throws
     func deleteSecret(account: String) throws
